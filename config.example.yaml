@@ -1,0 +1,61 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# TPT Backtesting Engine — example configuration
+#
+# Copy this file to config.yaml and adjust as needed.
+# All fields are optional; defaults are shown here.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── File paths ────────────────────────────────────────────────────────────────
+# Place your TradingView CSV exports in the data/ directory.
+mgc1_file: "data/MGC1.csv"
+m2k1_file: "data/M2K1.csv"
+output_dir: "reports"
+
+# ── Timezone assumption ───────────────────────────────────────────────────────
+# The TradingView "Date and time" column is assumed to already be in this zone.
+# Change to "UTC" if your export uses UTC timestamps.
+data_timezone: "US/Eastern"
+
+# ── Session / weekend filter ─────────────────────────────────────────────────
+# "drop"    — remove any trade whose open interval crosses a TPT boundary.
+#             (Recommended; safest for evaluation purposes.)
+# "flatten" — retain the trade but approximate the forced-exit PnL as the
+#             originally-recorded PnL.  ⚠️  APPROXIMATION — no OHLC available.
+session_mode: "drop"
+
+# ── TPT account rules (do NOT change unless TPT changes their rules) ──────────
+account_size: 150000.0
+profit_target: 9000.0
+max_trailing_dd: 4500.0
+min_trading_days: 5
+max_position_micros: 150
+consistency_threshold: 0.50   # 50% single-day cap
+
+# ── Trailing drawdown mode ────────────────────────────────────────────────────
+# "eod"            — peak updates at end of each TPT trading day (default).
+# "close_to_close" — peak updates after every individual closed trade.
+trailing_dd_mode: "eod"
+
+# ── M2K1! position-sizing sweep ───────────────────────────────────────────────
+# Original total position size in the M2K1! log (3-lot TP1 + 7-lot TP2 = 10).
+m2k1_base_size: 10
+# Effective sizes to test.  PnL scales linearly: pnl * (target / base).
+# ⚠️  APPROXIMATION: assumes no slippage/liquidity impact from larger size.
+m2k1_sweep_sizes: [5, 7, 8, 10, 12, 15]
+
+# ── MGC1! sizing ─────────────────────────────────────────────────────────────
+# Keep at 1.0 to use the native MGC1! sizing from the CSV.
+mgc1_size_multiplier: 1.0
+
+# ── Dynamic M2K1! sizing (optional) ──────────────────────────────────────────
+# Start at a conservative size and step up once the account is up by the
+# trigger amount.  This protects the trailing drawdown early on.
+dynamic_sizing_enabled: false
+dynamic_sizing_start: 5      # lots at start of evaluation
+dynamic_sizing_step: 10      # lots after step-up
+dynamic_sizing_trigger: 3000.0   # trigger when equity rises by $3,000
+
+# ── Charts ────────────────────────────────────────────────────────────────────
+# Set to true to generate equity + drawdown charts (saved as PNG to output_dir).
+# Requires matplotlib; set to false if running in a headless environment.
+generate_charts: false
