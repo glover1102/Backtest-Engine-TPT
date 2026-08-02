@@ -1,46 +1,58 @@
 # TPT Backtesting Engine
 
-A Python backtesting and analysis engine that evaluates whether running two futures strategies together can **pass a Take Profit Trader (TPT) $150,000 evaluation account** under its real rules.
+A Python backtesting and analysis engine that evaluates whether running multiple futures strategies together can **pass a Take Profit Trader (TPT) $150,000 evaluation account** under its confirmed rules.
 
-The engine ingests two TradingView "Any Strategy Converter" trade-log CSV exports (MGC1! Micro Gold and M2K1! Micro Russell), applies TPT session/weekend rules, sweeps M2K1! position sizing, and reports pass/fail against the TPT ruleset.
-
----
-
-## ⚠️ Critical Limitation: Close-to-Close Only (No Intraday OHLC)
-
-**This engine computes drawdown from closed trade PnL only (close-to-close).**
-
-TPT's trailing drawdown is evaluated on real-time marked-to-market equity, which includes **open-position floating losses**. Since 1-minute OHLC data is not available, the engine cannot detect intraday drawdown breaches that occur *while* a position is open.
-
-As a proxy, the engine uses the `Adverse Excursion USD` field from the CSV to produce a **conservative upper-bound estimate** of floating drawdown (`max_floating_dd_proxy`). This proxy is clearly labelled in all reports as an approximation, not a confirmed breach.
-
-**Conclusion:** a scenario that shows no breach in this engine is *necessary but not sufficient* to confirm the evaluation would pass. You should monitor intraday equity closely in live trading.
+The engine supports up to 5 CME micro-futures symbols simultaneously: **MGC (Micro Gold), M2K (Micro Russell 2000), MNQ (Micro Nasdaq-100), MYM (Micro Dow), MCL (Micro Crude Oil)**. It ingests TradingView "Any Strategy Converter" trade-log CSV exports, applies TPT session/weekend rules, computes an **intraday concurrency-based drawdown estimate**, and reports survival/fee-gate verdicts.
 
 ---
 
-## TPT $150,000 Account Rules (Implemented)
+## ⚠️ CRITICAL LIMITATION: No Intraday OHLC Data
 
-| Rule | Value |
-|------|-------|
-| Account size | $150,000 |
-| Max position | 15 standard OR 150 micro contracts |
-| Profit target | $9,000 |
-| Maximum trailing drawdown | $4,500 (trails peak equity) |
-| Trading hours | 6:00 PM ET → 5:00 PM ET next day |
-| Auto-flatten time | 4:55 PM ET daily |
-| Weekend block | Friday 17:00 ET → Sunday 18:00 ET |
-| Minimum trading days | 5 (any day with ≥1 trade) |
-| Profit consistency | No single day ≥ 50% of net P/L |
+> **ESTIMATE ONLY — intraday tick-by-tick breach cannot be confirmed without 1-minute/tick OHLC data. Size defensively against the UPPER BOUND.**
 
-### Profit Consistency Rule Detail
+TPT's trailing drawdown is evaluated on **real-time marked-to-market equity**, including **open-position floating losses**, measured tick-by-tick. The trade logs are close-to-close per trade. We only have the `Adverse Excursion USD` column giving each trade's worst intra-trade floating loss — but **not its timestamp**.
 
-If `highest_profit_day / net_pl ≥ 50%`, the account does **not** fail outright. Instead:
+Therefore:
+- A true tick-by-tick trailing-drawdown breach **cannot be definitively confirmed** from this data.
+- The engine computes a **conservative concurrency-based estimate**: it stacks the `Adverse Excursion` values of simultaneously-open trades to bound the worst-case combined floating drawdown.
+- Every drawdown verdict is clearly labelled with an "ESTIMATE ONLY" banner.
 
+**To get a definitive intraday drawdown validation:** source 1-minute or tick OHLC data for each symbol and integrate it with the trade log.
+
+---
+
+## TPT $150,000 Confirmed Evaluation Rules
+
+| Rule | Value | Notes |
+|------|-------|-------|
+| Account size | $150,000 | |
+| Max position | 150 micro contracts | Across ALL symbols simultaneously |
+| Monthly profit target | $9,000 combined | Within ~20 trading days; **MISS = pay recurring fee, NOT account failure** |
+| **Maximum trailing drawdown** | **$4,500** | **THE ONLY HARD FAIL CONDITION** — intraday/real-time, includes open floating losses |
+| Trading session | 6:00 PM ET → 5:00 PM ET | Trade opened ≥ 6 PM counts toward next day |
+| Auto-flatten | 4:55 PM ET daily | No positions held overnight |
+| Weekend block | Friday 17:00 ET → Sunday 18:00 ET | |
+| Minimum trading days | 5 per evaluation | |
+| Profit consistency | Best day < 50% of net P/L | Failure = goal raised to `net_pl × 2`, **NOT account failure** |
+
+### Verdict Hierarchy
+
+The **ONLY** thing that fails the account is the `$4,500 intraday trailing drawdown breach`:
+
+```
+⛔ BREACH (drawdown)       ← ONLY hard fail; the account is dead
+⚠️  AT RISK (est. DD ≥ buffer) ← within safety margin; size down
+✓  SURVIVED                ← account alive; then check the fee gate:
+   Monthly $9k → PASS or MISS (pay recurring fee, NOT failure)
+```
+
+### Profit Consistency Rule
+
+If `highest_profit_day / net_pl ≥ 50%`, the account does **not fail**. Instead:
 ```
 updated_profit_goal = net_pl × 2
 ```
-
-The trader must continue trading until the highest day is `< 50%` of the updated net P/L.
+The trader must continue trading until consistency < 50%.  This is a **goal adjustment**, never a fatal condition.
 
 ---
 
@@ -56,19 +68,22 @@ pip install -r requirements.txt
 
 ## Placing Your Data Files
 
-Place your TradingView CSV exports in the `data/` directory:
-
 ```
 data/
-├── MGC1.csv    ← Any_Strategy_Converter export for COMEX:MINI:MGC1!
-└── M2K1.csv    ← Strategy export for CME:MINI:M2K1!
+├── MGC1.csv    ← Micro Gold  (required for 3-symbol run)
+├── M2K1.csv    ← Micro Russell 2000  (5-lot scale-in file; baseline auto-detected)
+├── MNQ1.csv    ← Micro Nasdaq-100  (add when available)
+├── MYM1.csv    ← Micro Dow  (add when available; no code change needed)
+└── MCL1.csv    ← Micro Crude Oil  (add when available; no code change needed)
 ```
 
-Default filenames are configurable (see `--mgc1` / `--m2k1` flags or config file).
+**Missing CSV files produce a warning and are skipped** — they are not errors. The engine runs with whatever files are present. Dropping a new CSV into `data/` and listing it in `config.yaml` automatically includes it without any code changes.
+
+**M2K baseline:** The default `M2K1.csv` should be the **5-lot** file (1+4 scale-in). The baseline contract size is auto-detected from the modal `Size (qty)` column, and PnL is scaled linearly to the configured `contract_size`.
 
 ### Expected CSV Format
 
-The files must be TradingView **"Any Strategy Converter"** exports with this header:
+TradingView **"Any Strategy Converter"** exports with this header:
 
 ```
 Trade number,Type,Date and time,Signal,Price USD,Size (qty),Size (value),
@@ -79,137 +94,176 @@ Cumulative PnL USD,Cumulative PnL %,Duration (bars)
 
 - **`Type`** values: `Entry Long`, `Entry Short`, `Exit Long`, `Exit Short`
 - Each Trade number may have multiple Exit rows (TP1, TP2 partial-exit legs)
-- `Net PnL USD` on Exit rows is the per-leg realised P&L (net of commission)
-- `Date and time` is assumed to be **US/Eastern** — change `data_timezone` in config if your export uses UTC or another timezone
+- `Net PnL USD` on Exit rows is the per-leg realized P&L (net of commission)
+- `Adverse Excursion USD` is the worst intra-trade floating loss (used for DD estimation)
+- `Date and time` is assumed to be **US/Eastern** timezone
 
 ---
 
 ## Running the Engine
 
-### Quickstart (all defaults)
+### Multi-symbol engine (new, recommended)
 
 ```bash
-python -m backtest_engine.run
+# With config file (recommended)
+cp config.example.yaml config.yaml
+python -m backtest_engine.run_multi --config config.yaml
+
+# Without config file (scans data/ for default filenames)
+python -m backtest_engine.run_multi
+
+# With EOD close-to-close comparison
+python -m backtest_engine.run_multi --config config.yaml --eod-comparison
+
+# Generate charts
+python -m backtest_engine.run_multi --config config.yaml --charts
+
+# Verbose logging
+python -m backtest_engine.run_multi --config config.yaml -v
 ```
 
-### With a config file
+### Legacy two-symbol engine (backward compatible)
 
 ```bash
 cp config.example.yaml config.yaml
 python -m backtest_engine.run --config config.yaml
 ```
 
-### Common CLI overrides
+---
 
-```bash
-# Custom file paths
-python -m backtest_engine.run --mgc1 data/My_Gold.csv --m2k1 data/My_Russell.csv
+## Multi-Symbol Config Schema
 
-# Session filter mode
-python -m backtest_engine.run --session-mode drop      # (default) remove boundary trades
-python -m backtest_engine.run --session-mode flatten   # approximate forced-exit PnL
+See [`config.example.yaml`](config.example.yaml) for the full annotated example.
 
-# Trailing drawdown mode
-python -m backtest_engine.run --dd-mode eod            # (default) peak updates EOD
-python -m backtest_engine.run --dd-mode close_to_close # peak updates per trade
+```yaml
+account:
+  size: 150000
+  profit_target: 9000            # combined/month; MISS = fee, not fail
+  trailing_drawdown: 4500        # THE ONLY hard fail
+  safety_buffer: 3000            # target: est. worst-case DD stays under this
+  max_micros: 150
+  min_trading_days: 5
+  consistency_pct: 0.50
+  weekend_filter_mode: drop
 
-# Custom size sweep
-python -m backtest_engine.run --sizes 5 7 10 12 15
-
-# Enable dynamic sizing + generate charts
-python -m backtest_engine.run --dynamic --charts
-
-# Verbose logging
-python -m backtest_engine.run -v
+symbols:
+  MGC: { csv: data/MGC1.csv, contract_size: 1, point_value: 10,  tick_size: 0.10 }
+  M2K: { csv: data/M2K1.csv, contract_size: 5, point_value: 5,   tick_size: 0.10 }
+  MNQ: { csv: data/MNQ1.csv, contract_size: 1, point_value: 2,   tick_size: 0.25 }
+  MYM: { csv: data/MYM1.csv, contract_size: 1, point_value: 0.50,tick_size: 1.0  }
+  MCL: { csv: data/MCL1.csv, contract_size: 1, point_value: 10,  tick_size: 0.01 }
 ```
 
-### All CLI options
+### Baked-in CME Micro Specs
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--config FILE` | YAML config file | none |
-| `--mgc1 FILE` | MGC1! CSV path | `data/MGC1.csv` |
-| `--m2k1 FILE` | M2K1! CSV path | `data/M2K1.csv` |
-| `--session-mode` | `drop` or `flatten` | `drop` |
-| `--dd-mode` | `eod` or `close_to_close` | `eod` |
-| `--sizes N [N ...]` | M2K1! sizes to sweep | `5 7 8 10 12 15` |
-| `--dynamic` | Enable dynamic sizing | disabled |
-| `--charts` | Generate PNG charts | disabled |
-| `--output-dir DIR` | Reports directory | `reports/` |
-| `--timezone TZ` | CSV data timezone | `US/Eastern` |
-| `-v / --verbose` | Debug logging | off |
+| Symbol | Instrument | point_value | tick_size | tick_value |
+|--------|-----------|-------------|-----------|-----------|
+| MGC | Micro Gold | 10 | 0.10 | 1.00 |
+| M2K | Micro Russell 2000 | 5 | 0.10 | 0.50 |
+| MNQ | Micro Nasdaq-100 | 2 | 0.25 | 0.50 |
+| MYM | Micro Dow | 0.50 | 1.0 | 0.50 |
+| MCL | Micro Crude Oil | 10 | 0.01 | 0.10 |
 
 ---
 
-## Configuration Reference
+## Intraday Concurrency-Based Trailing Drawdown Engine
 
-See [`config.example.yaml`](config.example.yaml) for the complete annotated example. Key options:
+### How it works
 
-### Timezone Assumption
+1. **Build event stream**: Every trade's `[entry_time, exit_time]` interval is decomposed into open/close events, sorted by timestamp.
 
-```yaml
-# Timezone of the "Date and time" column in your CSV exports.
-# Change to "UTC" if your TradingView export uses UTC.
-data_timezone: "US/Eastern"
+2. **Trailing peak ratchet**: The realized equity (from closed trades) is tracked. A `trailing_peak` variable starts at `initial_equity` and ratchets up (never down) whenever a trade close produces a new equity high.
+
+3. **At each event**, identify the set of currently open trades. Compute two bounds on combined worst-case floating equity:
+   - **Upper bound (conservative — size defensively against this)**:
+     ```
+     upper_equity = realized_equity + sum(adverse_excursion of all open trades)
+     ```
+     Assumes ALL concurrent trades hit their worst simultaneously.
+   - **Lower bound (optimistic)**:
+     ```
+     lower_equity = realized_equity + min(adverse_excursion of open trades)
+     ```
+     Assumes only the single worst trade hits its low.
+
+4. **Drawdown from peak**:
+   ```
+   upper_dd = upper_equity - trailing_peak   (≤ 0 = drawdown)
+   lower_dd = lower_equity - trailing_peak
+   ```
+
+5. **Flags**:
+   - `AT RISK`: `upper_dd ≤ -safety_buffer` (e.g. −$3,000)
+   - `BREACH ESTIMATE`: `upper_dd ≤ -trailing_drawdown_limit` (e.g. −$4,500)
+
+### Why concurrency matters
+
+If MGC's worst −$500 AE trade and MNQ's worst −$300 AE trade happen on **different** days, they never stack. The engine only adds AE values for trades whose `[entry_time, exit_time]` intervals overlap in time.
+
+**Concurrency is your friend**: non-concurrent bad trades don't inflate combined drawdown risk.
+
+### 150-micro concurrency cap
+
+The engine sums `effective_size` across all simultaneously-open trades to compute the peak concurrent micro-contract count. This is checked against the 150-micro cap (not just per-trade size).
+
+---
+
+## Monthly $9k Evaluation (Fee Gate, Not Failure)
+
+For each calendar month in the data:
+- Combined net P/L is summed across all symbols and trading days.
+- If it reaches `$9,000` (or the consistency-adjusted goal) within ≥ 5 trading days → **PASS**.
+- If not → **MISS** = pay the recurring fee and continue. **NOT account failure**.
+
+Output: per-month `PASS/MISS` table + overall monthly pass-rate %.
+
 ```
-
-### Session Filter
-
-```yaml
-# "drop"    — remove trades crossing 4:55 PM ET or Fri 17:00–Sun 18:00 ET (recommended)
-# "flatten" — retain but approximate forced-exit PnL (APPROXIMATION; no OHLC)
-session_mode: "drop"
-```
-
-### Trailing Drawdown Mode
-
-```yaml
-# "eod"            — peak updates once at EOD (mirrors typical prop-firm evaluation)
-# "close_to_close" — peak updates after every closed trade (more conservative)
-trailing_dd_mode: "eod"
-```
-
-### M2K1! Sizing Sweep
-
-```yaml
-# Original total position size in the M2K1! CSV (3-lot TP1 + 7-lot TP2 = 10)
-m2k1_base_size: 10
-# PnL scales linearly: effective_pnl = original_pnl * (target / base)
-# APPROXIMATION: assumes linear scaling, no liquidity impact from larger size
-m2k1_sweep_sizes: [5, 7, 8, 10, 12, 15]
-mgc1_size_multiplier: 1.0
-```
-
-### Dynamic Sizing
-
-```yaml
-dynamic_sizing_enabled: false
-dynamic_sizing_start: 5       # M2K1! lots at start of evaluation
-dynamic_sizing_step: 10       # M2K1! lots after trigger is reached
-dynamic_sizing_trigger: 3000.0  # Trigger when equity is +$3,000 above start
+NOTE: Monthly $9k = recurring-fee gate, NOT account failure.
+MISS = pay another month's fee and continue.
+ONLY a $4,500 intraday trailing drawdown breach FAILS the account.
 ```
 
 ---
 
 ## Outputs
 
-### Console Report (per scenario)
+### Console Report
 
-Each scenario prints month-by-month P&L, drawdown status, consistency check, and a verdict:
-`PASS` / `FAIL (target)` / `BREACH (drawdown)` / `FAIL (consistency)`
+```
+  SYMBOLS LOADED: MGC, M2K, MNQ
+  ⚠️  MISSING: MYM, MCL
+
+  PER-SYMBOL CONTRIBUTION (month-by-month)
+  Month       MGC       M2K      MNQ    COMBINED
+  2026-03   ...
+
+  MONTHLY $9K EVALUATION
+  2026-03    21    $6,500   $9,000  MISS (pay recurring fee)
+  2026-04    20   $11,200   $9,000  PASS
+  Monthly pass-rate: 1/2 → 50%  (MISS = recurring fee, not failure)
+
+  INTRADAY TRAILING DRAWDOWN ESTIMATE
+  ⚠️  ESTIMATE ONLY — intraday tick-by-tick breach cannot be confirmed...
+  Upper-bound worst DD: -$2,800  ← size defensively against this
+  Lower-bound worst DD: -$1,200  ← optimistic
+  Fatal DD limit: -$4,500
+
+  OVERALL VERDICT: ✓ SURVIVED — drawdown estimate within safety margin
+  Monthly $9k: 1/2 PASS (50% pass-rate) ← MISS = recurring fee, not failure
+```
 
 ### CSV Outputs (`reports/`)
 
 | File | Contents |
 |------|----------|
-| `summary.csv` | All scenarios, one row each |
-| `<scenario>_monthly.csv` | Month-by-month PnL |
-| `<scenario>_drawdown.csv` | Per-day drawdown curve |
-| `<scenario>_daily_pnl.csv` | Per-day PnL + cumulative |
+| `combined_monthly.csv` | Per-month P/L, PASS/MISS, per-symbol breakdown |
+| `combined_trades.csv` | All trades with effective PnL/size |
+| `concurrency_timeline_worst.csv` | Top 200 worst-DD concurrency events |
+| `summary.csv` (legacy) | All scenarios, one row each |
 
 ### Charts (optional, `reports/*.png`)
 
-Enable with `--charts`. Equity curve + drawdown underwater plot per scenario.
+Enable with `--charts`. Equity curve + drawdown underwater plot with upper/lower AE bounds.
 
 ---
 
@@ -217,10 +271,11 @@ Enable with `--charts`. Equity curve + drawdown underwater plot per scenario.
 
 | Approximation | Description |
 |--------------|-------------|
-| **Close-to-close drawdown** | Intraday floating losses unknown without 1-min OHLC. Only realized (closed) drawdown is detected. |
-| **AE proxy** | Per-trade `Adverse Excursion USD` summed daily as a conservative upper-bound floating-DD estimate. Not a confirmed breach. |
-| **Flatten mode** | Forced-exit PnL approximated as originally-recorded PnL (no OHLC to determine true exit price). |
-| **Linear PnL scaling** | M2K1! PnL scaled by `target/base`. Assumes no slippage increase at larger sizes. |
+| **No intraday OHLC** | Worst-case floating drawdown ESTIMATED from `Adverse Excursion USD`; NOT a confirmed breach. |
+| **AE timestamp unknown** | AE lows are not timestamped; concurrency-based stacking uses open intervals as proxy. |
+| **Linear PnL scaling** | Per-symbol PnL scaled by `configured_size / baseline_size`. Assumes linear scaling; no liquidity constraints. |
+| **Close-to-close peak** | Trailing peak updated at trade-close events only; true real-time peak may be higher. |
+| **Flatten mode** | Forced-exit PnL approximated as originally-recorded PnL (no OHLC). |
 
 ---
 
@@ -238,19 +293,23 @@ Tests use **synthetic in-memory CSV fixtures** — no real data files required.
 
 ```
 backtest_engine/
-├── config.py        — Config dataclass + YAML loader
+├── config.py        — Config dataclasses (multi-symbol + legacy) + YAML loaders
 ├── parser.py        — CSV parsing, entry/exit pairing, PnL validation
+├── loader.py        — Multi-symbol CSV loader (warn on missing, baseline auto-detect)
 ├── session.py       — TPT trading day assignment, session/weekend filter
-├── sizing.py        — M2K1! static + dynamic sizing sweep
-├── drawdown.py      — Trailing drawdown engine (EOD + close-to-close)
+├── sizing.py        — Per-symbol sizing, concurrency cap check
+├── concurrency.py   — Intraday concurrency-based trailing-DD engine (AE bounds)
+├── monthly.py       — Monthly $9k pass/miss evaluation (fee-gate, not failure)
+├── drawdown.py      — EOD/close-to-close trailing drawdown engine (legacy)
 ├── consistency.py   — Profit consistency rule + updated profit goal
-├── reporting.py     — Console + CSV reports, optional charts
-└── run.py           — CLI entry point
+├── reporting.py     — Console + CSV reports (multi-symbol + legacy), charts
+├── run_multi.py     — Multi-symbol CLI entry point
+└── run.py           — Legacy two-symbol CLI entry point
 
 tests/               — pytest suite (synthetic fixtures, no real data)
 data/                — Place your CSV files here (gitignored)
 reports/             — Output directory (gitignored, except .gitkeep)
-config.example.yaml  — Annotated configuration example
+config.example.yaml  — Annotated configuration example (multi-symbol schema)
 ```
 
 ---
@@ -258,3 +317,4 @@ config.example.yaml  — Annotated configuration example
 ## References
 
 - [TPT $150k Evaluation Rules](https://takeprofittraderhelp.zendesk.com/hc/en-us/categories/15135982702621-Test-Rules)
+

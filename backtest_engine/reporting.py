@@ -5,6 +5,8 @@ Generates per-scenario reports:
 * Console table (ASCII)
 * CSV files under ``reports/``
 * Optional matplotlib equity + drawdown charts (guarded by config flag)
+
+Multi-symbol reporting functions are at the bottom of this module.
 """
 
 from __future__ import annotations
@@ -18,7 +20,9 @@ from typing import Dict, List, Optional
 import pandas as pd
 
 from .consistency import ConsistencyResult, profit_target_reached_after_days
+from .concurrency import ConcurrencyResult, ESTIMATE_BANNER
 from .drawdown import DrawdownResult
+from .monthly import MonthlyEvalResult, MONTHLY_DISCLAIMER
 
 logger = logging.getLogger(__name__)
 
@@ -409,3 +413,302 @@ def print_recommendation(scenarios: List[ScenarioResult]) -> None:
         print(f"    Net P/L: ${best_dyn.total_net_pl:,.2f}  |  Verdict: {best_dyn.verdict}")
 
     print("=" * 70 + "\n")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-symbol combined report
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_multi_symbol_report(
+    *,
+    trades: pd.DataFrame,
+    present_symbols: List[str],
+    missing_symbols: List[str],
+    concurrency: ConcurrencyResult,
+    monthly: MonthlyEvalResult,
+    consistency: ConsistencyResult,
+    profit_target: float = 9_000.0,
+    max_micros: int = 150,
+) -> None:
+    """
+    Print the combined multi-symbol report to the console.
+
+    Parameters
+    ----------
+    trades:
+        Session-filtered, sized combined DataFrame.
+    present_symbols:
+        Symbol names that were successfully loaded.
+    missing_symbols:
+        Symbol names that were not found (warned, skipped).
+    concurrency:
+        Result from :func:`~backtest_engine.concurrency.compute_intraday_concurrency`.
+    monthly:
+        Result from :func:`~backtest_engine.monthly.evaluate_monthly`.
+    consistency:
+        Overall consistency result.
+    profit_target:
+        Monthly $9k target (informational).
+    max_micros:
+        Concurrent micro-contract cap.
+    """
+    sep = "=" * 74
+    print(f"\n{sep}")
+    print("  TPT $150,000 EVALUATION — MULTI-SYMBOL COMBINED REPORT")
+    print(sep)
+
+    # Symbol status
+    print(f"\n  Symbols loaded:  {', '.join(present_symbols) if present_symbols else 'NONE'}")
+    if missing_symbols:
+        print(f"  ⚠️  Missing CSVs: {', '.join(missing_symbols)}  (drop CSV in data/ to include)")
+
+    # Per-symbol month-by-month summary
+    pnl_col = "effective_pnl" if "effective_pnl" in trades.columns else "net_pnl"
+    if not trades.empty and present_symbols:
+        print(f"\n  {'─' * 70}")
+        print("  PER-SYMBOL CONTRIBUTION (month-by-month)")
+        print(f"  {'─' * 70}")
+        df = trades.copy()
+        df["month"] = pd.to_datetime(df["tpt_trading_day"]).dt.to_period("M").astype(str)
+        pivot = (
+            df.groupby(["month", "symbol"])[pnl_col]
+            .sum()
+            .unstack(fill_value=0.0)
+        )
+        # Add combined
+        pivot["COMBINED"] = pivot.sum(axis=1)
+        sym_cols = [c for c in pivot.columns if c != "COMBINED"]
+        header = f"  {'Month':<10}"
+        for sym in sym_cols:
+            header += f" {sym:>10}"
+        header += f" {'COMBINED':>12}"
+        print(header)
+        print("  " + "-" * (10 + 11 * len(sym_cols) + 13))
+        for month, row in pivot.iterrows():
+            line = f"  {str(month):<10}"
+            for sym in sym_cols:
+                line += f" {row.get(sym, 0.0):>10,.2f}"
+            line += f" {row['COMBINED']:>12,.2f}"
+            print(line)
+        print("  " + "-" * (10 + 11 * len(sym_cols) + 13))
+        total_line = f"  {'TOTAL':<10}"
+        for sym in sym_cols:
+            total_line += f" {pivot[sym].sum():>10,.2f}"
+        total_line += f" {pivot['COMBINED'].sum():>12,.2f}"
+        print(total_line)
+
+    # Monthly pass/miss table
+    print(f"\n  {'─' * 70}")
+    print("  MONTHLY $9K PROFIT-TARGET EVALUATION")
+    print(f"  {MONTHLY_DISCLAIMER}")
+    print(f"  {'─' * 70}")
+    print(f"  {'Month':<10} {'Days':>5} {'Net P/L':>12} {'Target':>10} {'Result':<30}")
+    print("  " + "-" * 60)
+    for m in monthly.months:
+        adj_mark = "*" if m.consistency_adjusted else " "
+        print(
+            f"  {m.month:<10} {m.n_trading_days:>5d} "
+            f"{m.combined_pnl:>12,.2f} "
+            f"{m.effective_target:>10,.0f}{adj_mark} "
+            f"{m.result:<30}"
+        )
+    if any(m.consistency_adjusted for m in monthly.months):
+        print("  * = consistency-adjusted target (best day ≥ 50% of net P/L → target × 2)")
+    print(f"\n  Monthly pass-rate: {monthly.pass_count}/{monthly.months_with_enough_days} "
+          f"months with ≥ min days → {monthly.pass_rate_pct:.0f}%  "
+          f"(MISS = recurring fee, NOT account failure)")
+
+    # Intraday drawdown estimate
+    print(f"\n  {'─' * 70}")
+    print("  INTRADAY TRAILING DRAWDOWN ESTIMATE")
+    print(f"  {ESTIMATE_BANNER}")
+    print(f"  {'─' * 70}")
+    print(f"  Trailing peak equity:         ${concurrency.peak_realized_equity:>12,.2f}")
+    print(f"  Final realized equity:        ${concurrency.final_realized_equity:>12,.2f}")
+    print()
+    print(f"  Upper-bound worst DD:         ${concurrency.upper_bound_worst_dd:>12,.2f}  "
+          f"← conservative / size against this")
+    print(f"  Lower-bound worst DD:         ${concurrency.lower_bound_worst_dd:>12,.2f}  "
+          f"← optimistic")
+    print(f"  Fatal DD limit:               ${-concurrency.trailing_drawdown_limit:>12,.2f}")
+    print(f"  Safety buffer threshold:      ${-concurrency.safety_buffer:>12,.2f}")
+    if concurrency.upper_bound_worst_time:
+        print(f"\n  Peak risk at:  {concurrency.upper_bound_worst_time}")
+        print(f"  Symbols open:  {', '.join(concurrency.upper_bound_worst_symbols)}")
+
+    if concurrency.any_breach_estimate:
+        print(f"\n  ⛔ VERDICT: AT RISK (est. floating DD ≥ $4,500 trailing limit)")
+        print(f"     {len(concurrency.breach_estimate_points)} event(s) where upper-bound estimate exceeds the limit.")
+        for pt in concurrency.breach_estimate_points[:5]:
+            print(f"     → {pt.timestamp}  upper DD ${pt.upper_dd_from_peak:,.2f}  "
+                  f"symbols: {', '.join(pt.active_symbols)}")
+        if len(concurrency.breach_estimate_points) > 5:
+            print(f"     … and {len(concurrency.breach_estimate_points) - 5} more events.")
+    elif concurrency.any_at_risk:
+        print(f"\n  ⚠️  VERDICT: CAUTION — est. floating DD approached safety buffer (${concurrency.safety_buffer:,.0f})")
+        print(f"     {len(concurrency.at_risk_points)} event(s) entered the caution zone.")
+    else:
+        print(f"\n  ✓  VERDICT: SURVIVED — est. worst-case floating DD stayed within safety buffer")
+
+    # Micro concurrency cap
+    print(f"\n  {'─' * 70}")
+    print("  150-MICRO CONCURRENCY CAP")
+    print(f"  {'─' * 70}")
+    cap_str = f"{'⛔ EXCEEDED' if concurrency.exceeds_micro_cap else '✓ OK'}"
+    print(f"  Peak concurrent micros: {concurrency.max_concurrent_micros:.0f} / {max_micros}  {cap_str}")
+    if concurrency.max_concurrent_micros_time:
+        print(f"  Peak at: {concurrency.max_concurrent_micros_time}")
+        print(f"  Symbols: {', '.join(concurrency.max_concurrent_micros_symbols)}")
+
+    # Consistency check
+    print(f"\n  {'─' * 70}")
+    print("  PROFIT CONSISTENCY CHECK (best single day < 50% of net P/L)")
+    print(f"  NOTE: consistency failure is NOT an account failure — it raises the goal.")
+    print(f"  {'─' * 70}")
+    print(f"  Overall net P/L:        ${consistency.net_pl:>12,.2f}")
+    print(f"  Highest profit day:     ${consistency.highest_profit_day:>12,.2f}  ({consistency.highest_profit_day_date})")
+    print(f"  Consistency %:          {consistency.consistency_pct * 100:>11.1f}%")
+    result_str = "✓ PASS" if consistency.passes_consistency else "✗ FAIL (goal adjusted)"
+    print(f"  Result:                 {result_str}")
+    if consistency.updated_profit_goal is not None:
+        print(f"  Adjusted profit goal:   ${consistency.updated_profit_goal:>12,.2f}  (net P/L × 2)")
+    print(f"  Min 5 trading days:     {'✓' if consistency.passes_min_days else '✗'}  ({consistency.n_trading_days} days)")
+
+    # Overall verdict
+    print(f"\n  {'─' * 70}")
+    if concurrency.any_breach_estimate:
+        verdict = "⛔ AT RISK — estimated intraday floating drawdown may breach $4,500 fatal limit"
+    elif concurrency.exceeds_micro_cap:
+        verdict = "⚠️  MICRO CAP EXCEEDED — reduce position sizes to stay under 150 contracts"
+    else:
+        verdict = "✓ SURVIVED — drawdown estimate within safety margin"
+
+    print(f"  OVERALL VERDICT:  {verdict}")
+    print(f"  Monthly $9k:  {monthly.pass_count}/{monthly.months_with_enough_days} PASS "
+          f"({monthly.pass_rate_pct:.0f}% pass-rate)  ← MISS = recurring fee, not failure")
+    print(sep + "\n")
+
+
+def export_multi_symbol_csv(
+    *,
+    trades: pd.DataFrame,
+    monthly: MonthlyEvalResult,
+    concurrency: ConcurrencyResult,
+    output_dir: str,
+) -> None:
+    """Write multi-symbol combined CSV reports to *output_dir*."""
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Monthly summary
+    if monthly.months:
+        monthly_rows = [
+            {
+                "month": m.month,
+                "n_trading_days": m.n_trading_days,
+                "combined_pnl": m.combined_pnl,
+                "effective_target": m.effective_target,
+                "consistency_adjusted": m.consistency_adjusted,
+                "hits_target": m.hits_target,
+                "result": m.result,
+                **{f"{sym}_pnl": m.per_symbol_pnl.get(sym, 0.0) for sym in m.per_symbol_pnl},
+            }
+            for m in monthly.months
+        ]
+        monthly_df = pd.DataFrame(monthly_rows)
+        monthly_path = os.path.join(output_dir, "combined_monthly.csv")
+        monthly_df.to_csv(monthly_path, index=False)
+        logger.info("Wrote combined monthly summary to %s", monthly_path)
+
+    # Concurrency timeline (top 100 worst points by upper-bound DD)
+    if concurrency.timeline:
+        tl_rows = [
+            {
+                "timestamp": pt.timestamp,
+                "event_type": pt.event_type,
+                "symbol": pt.symbol,
+                "realized_equity": pt.realized_equity,
+                "trailing_peak": pt.trailing_peak,
+                "n_concurrent_micros": pt.n_concurrent_micros,
+                "active_symbols": ";".join(pt.active_symbols),
+                "upper_ae_sum": pt.upper_ae_sum,
+                "lower_ae_min": pt.lower_ae_min,
+                "upper_dd_from_peak": pt.upper_dd_from_peak,
+                "lower_dd_from_peak": pt.lower_dd_from_peak,
+                "at_risk_upper": pt.at_risk_upper,
+                "breach_estimate_upper": pt.breach_estimate_upper,
+            }
+            for pt in concurrency.timeline
+        ]
+        tl_df = pd.DataFrame(tl_rows)
+        # Write top worst + at-risk subset to keep file manageable
+        worst = tl_df.nsmallest(200, "upper_dd_from_peak")
+        tl_path = os.path.join(output_dir, "concurrency_timeline_worst.csv")
+        worst.to_csv(tl_path, index=False)
+        logger.info("Wrote concurrency timeline (200 worst points) to %s", tl_path)
+
+    # Per-trade with effective columns
+    if not trades.empty:
+        pnl_col = "effective_pnl" if "effective_pnl" in trades.columns else "net_pnl"
+        trades_path = os.path.join(output_dir, "combined_trades.csv")
+        trades.to_csv(trades_path, index=False)
+        logger.info("Wrote combined trades to %s", trades_path)
+
+
+def print_size_recommendation(
+    *,
+    present_symbols: List[str],
+    baseline_sizes: Dict[str, int],
+    current_sizes: Dict[str, int],
+    concurrency: ConcurrencyResult,
+    monthly: MonthlyEvalResult,
+    safety_buffer: float = 3_000.0,
+    trailing_dd_limit: float = 4_500.0,
+    max_micros: int = 150,
+) -> None:
+    """
+    Print a survival-first size recommendation.
+
+    Reports whether the current sizing keeps estimated worst-case concurrent
+    floating DD under the safety buffer and within the micro cap.
+    """
+    sep = "=" * 74
+    print(f"\n{sep}")
+    print("  SURVIVAL-FIRST SIZE RECOMMENDATION")
+    print(sep)
+    print(f"\n  Current sizing:")
+    for sym in present_symbols:
+        base = baseline_sizes.get(sym, 1)
+        curr = current_sizes.get(sym, 1)
+        mark = "  (native)" if curr == base else f"  (baseline {base})"
+        print(f"    {sym}: {curr} contract(s){mark}")
+
+    print(f"\n  Safety buffer target: ${safety_buffer:,.0f} below ${trailing_dd_limit:,.0f} limit")
+
+    upper_dd = concurrency.upper_bound_worst_dd
+    within_buffer = upper_dd > -safety_buffer
+    within_cap = not concurrency.exceeds_micro_cap
+
+    if within_buffer and within_cap:
+        print(f"\n  ✓ Current sizing PASSES the survival check:")
+        print(f"    Est. upper-bound worst DD: ${upper_dd:,.2f}  (within ${safety_buffer:,.0f} buffer)")
+        print(f"    Peak concurrent micros: {concurrency.max_concurrent_micros:.0f} ≤ {max_micros}")
+        print(f"\n  Estimated monthly performance at current sizing:")
+        print(f"    Monthly pass-rate: {monthly.pass_rate_pct:.0f}%  "
+              f"({monthly.pass_count}/{monthly.months_with_enough_days} months)")
+        if monthly.months:
+            avg_pnl = sum(m.combined_pnl for m in monthly.months) / len(monthly.months)
+            print(f"    Average monthly P/L: ${avg_pnl:,.2f}")
+    else:
+        print(f"\n  ⚠️  Current sizing EXCEEDS the survival check:")
+        if not within_buffer:
+            print(f"    Est. upper-bound worst DD ${upper_dd:,.2f} breaches safety buffer ${-safety_buffer:,.0f}")
+            print(f"    → Reduce position sizes (especially symbols open concurrently at peak risk)")
+        if not within_cap:
+            print(f"    Peak concurrent micros {concurrency.max_concurrent_micros:.0f} > cap {max_micros}")
+            print(f"    → Reduce total open contracts at any one time")
+        print(f"\n  To find a safe combination: reduce the symbol with the highest AE at peak risk")
+        if concurrency.upper_bound_worst_symbols:
+            print(f"  Peak risk symbols: {', '.join(concurrency.upper_bound_worst_symbols)}")
+
+    print(f"\n  {ESTIMATE_BANNER}")
+    print(sep + "\n")
