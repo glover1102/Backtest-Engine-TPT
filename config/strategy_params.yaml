@@ -1,0 +1,59 @@
+# MoM Sniper Strategy Parameters
+# ================================
+# Full parameter set for the Momentum Sniper backtest engine.
+
+# -------------------------------------------------------------------
+# MOM Oscillator (primary signal trigger)
+# -------------------------------------------------------------------
+mom:
+  mom_length: 10          # look-back period for MOM = Close - Close.shift(n)
+
+# -------------------------------------------------------------------
+# Supertrend (directional bias / trend gate)
+# -------------------------------------------------------------------
+supertrend:
+  st_atr_period: 10       # ATR period for Supertrend bands
+  st_multiplier: 3.0      # band multiplier (higher = wider, fewer flips)
+
+# -------------------------------------------------------------------
+# EMA Cross (macro trend filter)
+# -------------------------------------------------------------------
+ema:
+  ema_fast: 50            # fast EMA period
+  ema_slow: 200           # slow EMA period
+
+# -------------------------------------------------------------------
+# ATR (volatility – used for TPT/SL sizing)
+# -------------------------------------------------------------------
+atr:
+  atr_length: 14          # ATR smoothing period
+
+# -------------------------------------------------------------------
+# MACD (momentum confirmation)
+# -------------------------------------------------------------------
+macd:
+  macd_fast:   12
+  macd_slow:   26
+  macd_signal:  9
+
+# -------------------------------------------------------------------
+# RSI (quality filter)
+# -------------------------------------------------------------------
+rsi:
+  rsi_length:     14
+  rsi_oversold:   30      # lower bound for short zone
+  rsi_overbought: 70      # upper bound for long zone
+
+# -------------------------------------------------------------------
+# TPT – Take Profit Target exit system
+# -------------------------------------------------------------------
+tpt:
+  sl_multiplier:   1.5    # stop-loss = entry ± sl_multiplier × ATR
+  tpt1_multiplier: 1.0    # TPT1 = entry ± tpt1_multiplier × risk  (risk = SL distance)
+  tpt2_multiplier: 2.0    # TPT2 = entry ± tpt2_multiplier × risk
+  tpt3_multiplier: 3.0    # TPT3 = entry ± tpt3_multiplier × risk
+  tpt1_size:       0.50   # fraction of position closed at TPT1  (50%)
+  tpt2_size:       0.30   # fraction of position closed at TPT2  (30%)
+                          # remaining 20% closed at TPT3 / trailing stop
+  trail_atr_mult:  1.0    # ATR multiplier for trailing stop (active after TPT1)
+  use_trailing:    true   # enable ATR trailing stop after TPT1
