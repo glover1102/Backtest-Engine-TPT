@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+.venv/
+venv/
+env/
+ENV/
+
+# Data files (user-placed, not tracked)
+data/*.csv
+data/*.txt
+
+# Reports output
+reports/*.csv
+reports/*.png
+reports/*.pdf
+
+# Keep placeholder files
+!reports/.gitkeep
+!data/.gitkeep
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
