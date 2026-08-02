@@ -1,61 +1,124 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# TPT Backtesting Engine — example configuration
+# TPT Backtesting Engine — example configuration (multi-symbol format)
 #
 # Copy this file to config.yaml and adjust as needed.
 # All fields are optional; defaults are shown here.
+#
+# Run the multi-symbol engine:
+#   python -m backtest_engine.run_multi --config config.yaml
+#
+# Run the legacy two-symbol engine (backward compatible):
+#   python -m backtest_engine.run --config config.yaml
 # ──────────────────────────────────────────────────────────────────────────────
 
-# ── File paths ────────────────────────────────────────────────────────────────
-# Place your TradingView CSV exports in the data/ directory.
-mgc1_file: "data/MGC1.csv"
-m2k1_file: "data/M2K1.csv"
-output_dir: "reports"
+# ── Account-level TPT evaluation rules ───────────────────────────────────────
+account:
+  size: 150000
 
-# ── Timezone assumption ───────────────────────────────────────────────────────
-# The TradingView "Date and time" column is assumed to already be in this zone.
-# Change to "UTC" if your export uses UTC timestamps.
+  # Monthly profit target: $9,000 combined across all symbols.
+  # ⚠️  MISSING the target is NOT a failure — it means you pay another monthly
+  # recurring fee and continue.  The account is ONLY failed by the $4,500
+  # intraday trailing drawdown breach.
+  profit_target: 9000
+  monthly_target_window_days: 20   # informational: ~20 trading days per month
+
+  # THE ONLY HARD FAIL: intraday trailing drawdown.
+  # Measured tick-by-tick in real time, INCLUDING open floating (unrealized)
+  # losses.  The floor trails the highest achieved equity and never moves down.
+  # If combined floating equity ever drops $4,500 below the running peak —
+  # even for a single tick — the account FAILS.
+  trailing_drawdown: 4500
+  dd_mode: intraday              # confirmed TPT rule: tick-by-tick incl. open floating
+  dd_source: adverse_excursion   # use AE column as per-trade intraday-loss estimate
+
+  # Concurrency: stack AE from simultaneously-open trades only.
+  concurrency: overlap_timestamps
+
+  # Safety buffer: recommend sizes whose est. worst-case combined floating DD
+  # stays under this value (default $3,000, giving $1,500 margin below $4,500).
+  safety_buffer: 3000
+
+  # Maximum concurrent micro contracts across ALL symbols simultaneously.
+  max_micros: 150
+
+  # Minimum trading days required (evaluated per calendar month).
+  min_trading_days: 5
+
+  # Best single day must be < 50% of net P/L.  If not, the effective profit
+  # goal is raised to net_pl × 2.  This is NOT a failure — just a higher bar.
+  consistency_pct: 0.50
+
+  session_tz: America/New_York
+  weekend_filter_mode: drop    # "drop" or "flatten"
+
+
+# ── Per-symbol configuration ──────────────────────────────────────────────────
+# Each symbol's CSV path, target contract size, and CME micro-futures specs.
+#
+# Baked-in CME micro-futures specs (point_value, tick_size, tick_value):
+#   MGC  Micro Gold            $10/pt   $0.10 tick  $1.00/tick
+#   M2K  Micro Russell 2000    $5/pt    $0.10 tick  $0.50/tick
+#   MNQ  Micro Nasdaq-100      $2/pt    $0.25 tick  $0.50/tick
+#   MYM  Micro Dow             $0.50/pt $1.00 tick  $0.50/tick
+#   MCL  Micro Crude Oil       $10/pt   $0.01 tick  $0.10/tick
+#
+# Missing CSV → warning + skip; no code change needed to add a new symbol.
+# Default M2K1.csv is the 5-lot file (1+4 scale-in); baseline auto-detected.
+symbols:
+  MGC:
+    csv: data/MGC1.csv
+    contract_size: 1          # 1 contract (native baseline)
+    point_value: 10.0
+    tick_size: 0.10
+
+  M2K:
+    csv: data/M2K1.csv
+    contract_size: 5          # 5-lot scale-in (1+4); baseline auto-detected
+    point_value: 5.0
+    tick_size: 0.10
+
+  MNQ:
+    csv: data/MNQ1.csv
+    contract_size: 1          # 1 contract (native baseline)
+    point_value: 2.0
+    tick_size: 0.25
+
+  MYM:
+    csv: data/MYM1.csv
+    contract_size: 1
+    point_value: 0.50
+    tick_size: 1.0
+
+  MCL:
+    csv: data/MCL1.csv
+    contract_size: 1
+    point_value: 10.0
+    tick_size: 0.01
+
+
+# ── Output ────────────────────────────────────────────────────────────────────
+output_dir: "reports"
 data_timezone: "US/Eastern"
 
-# ── Session / weekend filter ─────────────────────────────────────────────────
-# "drop"    — remove any trade whose open interval crosses a TPT boundary.
-#             (Recommended; safest for evaluation purposes.)
-# "flatten" — retain the trade but approximate the forced-exit PnL as the
-#             originally-recorded PnL.  ⚠️  APPROXIMATION — no OHLC available.
-session_mode: "drop"
-
-# ── TPT account rules (do NOT change unless TPT changes their rules) ──────────
-account_size: 150000.0
-profit_target: 9000.0
-max_trailing_dd: 4500.0
-min_trading_days: 5
-max_position_micros: 150
-consistency_threshold: 0.50   # 50% single-day cap
-
-# ── Trailing drawdown mode ────────────────────────────────────────────────────
-# "eod"            — peak updates at end of each TPT trading day (default).
-# "close_to_close" — peak updates after every individual closed trade.
-trailing_dd_mode: "eod"
-
-# ── M2K1! position-sizing sweep ───────────────────────────────────────────────
-# Original total position size in the M2K1! log (3-lot TP1 + 7-lot TP2 = 10).
-m2k1_base_size: 10
-# Effective sizes to test.  PnL scales linearly: pnl * (target / base).
-# ⚠️  APPROXIMATION: assumes no slippage/liquidity impact from larger size.
-m2k1_sweep_sizes: [5, 7, 8, 10, 12, 15]
-
-# ── MGC1! sizing ─────────────────────────────────────────────────────────────
-# Keep at 1.0 to use the native MGC1! sizing from the CSV.
-mgc1_size_multiplier: 1.0
-
-# ── Dynamic M2K1! sizing (optional) ──────────────────────────────────────────
-# Start at a conservative size and step up once the account is up by the
-# trigger amount.  This protects the trailing drawdown early on.
-dynamic_sizing_enabled: false
-dynamic_sizing_start: 5      # lots at start of evaluation
-dynamic_sizing_step: 10      # lots after step-up
-dynamic_sizing_trigger: 3000.0   # trigger when equity rises by $3,000
-
-# ── Charts ────────────────────────────────────────────────────────────────────
 # Set to true to generate equity + drawdown charts (saved as PNG to output_dir).
-# Requires matplotlib; set to false if running in a headless environment.
 generate_charts: false
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# IMPORTANT LIMITATION
+# ──────────────────────────────────────────────────────────────────────────────
+# We do NOT have 1-minute or tick OHLC data.  The trade logs are
+# close-to-close, with an Adverse Excursion USD column giving each trade's
+# worst intra-trade floating loss (but NOT its timestamp).
+#
+# Therefore: a true tick-by-tick trailing-drawdown breach CANNOT be
+# definitively confirmed from this data.  The engine computes a conservative
+# concurrency-based ESTIMATE.  Every drawdown verdict is labelled:
+#
+#   "ESTIMATE ONLY — intraday tick-by-tick breach cannot be confirmed
+#    without 1-minute/tick OHLC.  Size defensively."
+#
+# To get a definitive intraday drawdown validation, source 1-minute or tick
+# OHLC data for each symbol and integrate it with the trade log.
+# ──────────────────────────────────────────────────────────────────────────────
+

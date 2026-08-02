@@ -1,17 +1,24 @@
 """
 TPT Backtesting Engine — position sizing.
 
-M2K1! sizing sweep
-==================
-The M2K1! trade log was produced with a scale-in pattern of 3 + 7 = 10 lots
-total (base_size = 10).  Because PnL is proportional to contract count, we can
-approximate any target size by a linear multiplier:
+Multi-symbol per-symbol sizing
+===============================
+Each symbol's trade log may encode a multi-lot scale-in strategy.  The
+baseline size is auto-detected from the modal ``Size (qty)`` across exit rows
+(see :func:`~backtest_engine.loader.detect_baseline_size`).
 
-    multiplier  = target_size / base_size
-    scaled_pnl  = original_pnl  × multiplier
-    scaled_size = original_size × multiplier
+The scaling multiplier for each symbol is:
 
-**This is a first-order approximation.**  It assumes:
+    multiplier = configured_size / baseline_size
+
+If ``configured_size == baseline_size`` the multiplier is 1.0 (no scaling,
+no double-counting).
+
+``effective_pnl`` and ``effective_size`` columns are added.  The original
+``net_pnl`` and ``size_qty`` columns are preserved unchanged.
+
+Linear scaling approximation
+-----------------------------
 * Slippage and commission scale linearly with contract count.
 * No partial-fill or liquidity constraints.
 * The same entry/exit price would have been achieved at the larger size.
@@ -19,19 +26,20 @@ approximate any target size by a linear multiplier:
 These assumptions hold well for micro futures in normal market conditions but
 may overstate returns during low-liquidity periods.
 
-MGC1! stays at its native sizing (multiplier = 1.0 by default).
+Concurrency-cap check
+=====================
+:func:`check_concurrent_position_limit` evaluates the maximum *simultaneous*
+open contract count (sum of effective_size across all overlapping open
+intervals).  This is more accurate than checking per-trade size because TPT's
+150-micro cap applies to ALL symbols combined at any given instant.
 
-Dynamic sizing (optional)
-=========================
-Start M2K1! at ``start_size`` lots and step up to ``step_size`` lots once the
-combined account equity has risen above ``initial_equity + trigger_profit``.
-This protects the trailing drawdown early in the evaluation.
+Legacy two-symbol sizing functions are preserved for backward compatibility.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -221,3 +229,147 @@ def check_position_limit(
         )
         return False
     return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-symbol concurrent position-cap check
+# ─────────────────────────────────────────────────────────────────────────────
+
+def check_concurrent_position_limit(
+    trades: pd.DataFrame,
+    max_micros: int = 150,
+) -> Tuple[bool, float, Optional[pd.Timestamp], List[str]]:
+    """
+    Check the CONCURRENT micro-contract count across all symbols.
+
+    Unlike :func:`check_position_limit` (which checks per-trade-leg size),
+    this function computes the maximum *simultaneous* open contract count by
+    summing ``effective_size`` across all trades whose ``[entry_time, exit_time]``
+    intervals overlap at any point in time.
+
+    Parameters
+    ----------
+    trades:
+        Combined (all symbols), session-filtered, sized DataFrame with
+        ``entry_time``, ``exit_time``, ``effective_size``, and ``symbol``.
+    max_micros:
+        Concurrent micro-contract cap (150 for TPT $150k).
+
+    Returns
+    -------
+    within_limit, peak_concurrent, peak_time, peak_symbols
+        * ``within_limit``     — True if peak concurrent ≤ max_micros.
+        * ``peak_concurrent``  — highest simultaneous contract count observed.
+        * ``peak_time``        — timestamp when the peak occurred.
+        * ``peak_symbols``     — symbols that were open at the peak.
+    """
+    if trades.empty:
+        return True, 0.0, None, []
+
+    size_col = "effective_size" if "effective_size" in trades.columns else "size_qty"
+
+    # Build (timestamp, +size, symbol) for open events
+    # and (timestamp, -size, symbol) for close events.
+    events: List[Tuple[pd.Timestamp, float, str]] = []
+    for _, row in trades.iterrows():
+        sz = float(row[size_col])
+        sym = str(row["symbol"])
+        events.append((row["entry_time"], +sz, sym))
+        events.append((row["exit_time"],  -sz, sym))
+
+    # Sort: process closes before opens at the same timestamp
+    events.sort(key=lambda e: (e[0], e[1]))  # closes are negative → before opens
+
+    current = 0.0
+    peak = 0.0
+    peak_time: Optional[pd.Timestamp] = None
+    peak_symbols: List[str] = []
+    open_symbols: Dict[str, int] = {}  # sym → count of open legs
+
+    for ts, delta, sym in events:
+        current += delta
+        if delta > 0:
+            open_symbols[sym] = open_symbols.get(sym, 0) + 1
+        else:
+            cnt = open_symbols.get(sym, 0) - 1
+            if cnt <= 0:
+                open_symbols.pop(sym, None)
+            else:
+                open_symbols[sym] = cnt
+
+        if current > peak:
+            peak = current
+            peak_time = ts
+            peak_symbols = list(open_symbols.keys())
+
+    within_limit = peak <= max_micros
+    if not within_limit:
+        logger.warning(
+            "Concurrent position-limit breach: peak %.0f micros > %d cap "
+            "(at %s, symbols: %s).",
+            peak,
+            max_micros,
+            peak_time,
+            peak_symbols,
+        )
+    else:
+        logger.info(
+            "Concurrent position check OK: peak %.0f micros ≤ %d cap.",
+            peak,
+            max_micros,
+        )
+
+    return within_limit, peak, peak_time, peak_symbols
+
+
+def rescale_symbol(
+    trades: pd.DataFrame,
+    symbol: str,
+    baseline_size: int,
+    target_size: int,
+) -> pd.DataFrame:
+    """
+    Rescale a single symbol's trades to *target_size* from *baseline_size*.
+
+    Adds/updates ``effective_pnl``, ``effective_size``, and (if present)
+    ``effective_ae`` / ``effective_fe`` columns.
+
+    Parameters
+    ----------
+    trades:
+        Combined multi-symbol DataFrame that already has ``effective_pnl`` /
+        ``effective_size`` columns (e.g. from :func:`~backtest_engine.loader.load_all_symbols`).
+    symbol:
+        The symbol name to rescale (e.g. ``"M2K"``).
+    baseline_size:
+        The currently assumed baseline (usually the auto-detected modal size).
+    target_size:
+        The desired target size.
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy with updated effective columns for *symbol*; other symbols
+        are unchanged.
+    """
+    df = trades.copy()
+    if "effective_pnl" not in df.columns:
+        df["effective_pnl"] = df["net_pnl"].copy()
+    if "effective_size" not in df.columns:
+        df["effective_size"] = df["size_qty"].copy()
+
+    mult = target_size / baseline_size if baseline_size > 0 else 1.0
+    mask = df["symbol"] == symbol
+    df.loc[mask, "effective_pnl"] = df.loc[mask, "net_pnl"] * mult
+    df.loc[mask, "effective_size"] = df.loc[mask, "size_qty"] * mult
+    if "adverse_excursion" in df.columns:
+        df.loc[mask, "effective_ae"] = df.loc[mask, "adverse_excursion"] * mult
+    if "favorable_excursion" in df.columns:
+        df.loc[mask, "effective_fe"] = df.loc[mask, "favorable_excursion"] * mult
+
+    logger.debug(
+        "Rescaled %s: baseline=%d, target=%d, multiplier=%.4f.",
+        symbol, baseline_size, target_size, mult,
+    )
+    return df
+
